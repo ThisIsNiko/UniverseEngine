@@ -3,24 +3,26 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Infinite Space Engine</title>
+  <title>Universe Engine: Infinite Drift</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #040510;
-      --panel: rgba(10, 16, 35, 0.72);
-      --panel-border: rgba(115, 154, 255, 0.35);
-      --text: #d9ecff;
-      --accent: #87e5ff;
-      --muted: #93a0c9;
+      --panel-bg: rgba(8, 14, 30, 0.78);
+      --panel-border: rgba(124, 170, 255, 0.35);
+      --text: #ddecff;
+      --muted: #90a4d6;
+      --accent: #95e7ff;
     }
 
-    html, body {
+    * { box-sizing: border-box; }
+
+    html,
+    body {
       margin: 0;
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background: radial-gradient(circle at center, #091229 0%, #040510 45%, #020208 100%);
+      background: #02040a;
       font-family: Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
       color: var(--text);
     }
@@ -29,38 +31,39 @@
       display: block;
       width: 100vw;
       height: 100vh;
+      image-rendering: auto;
     }
 
     .hud {
       position: fixed;
       top: 14px;
       left: 14px;
-      background: var(--panel);
+      width: min(410px, calc(100vw - 28px));
+      background: var(--panel-bg);
       border: 1px solid var(--panel-border);
-      backdrop-filter: blur(8px);
       border-radius: 12px;
       padding: 12px 14px;
-      max-width: 350px;
-      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
-      line-height: 1.38;
+      box-shadow: 0 14px 28px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(9px);
       pointer-events: none;
+      user-select: none;
     }
 
     .hud h1 {
       margin: 0 0 6px;
       font-size: 15px;
-      font-weight: 700;
-      letter-spacing: 0.03em;
       color: var(--accent);
+      letter-spacing: 0.04em;
+      font-weight: 700;
     }
 
     .row {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
       font-size: 12px;
+      margin: 3px 0;
       color: var(--muted);
-      margin: 2px 0;
     }
 
     .value {
@@ -69,23 +72,25 @@
     }
 
     .legend {
-      margin-top: 8px;
+      margin-top: 9px;
       font-size: 11px;
-      color: #aac0ee;
-      opacity: 0.95;
+      line-height: 1.45;
+      color: #aec1ee;
     }
   </style>
 </head>
 <body>
   <canvas id="space"></canvas>
+
   <div class="hud">
     <h1>Universe Engine</h1>
-    <div class="row"><span>Current speed</span><span class="value" id="speed">1 m/s</span></div>
+    <div class="row"><span>Current speed</span><span class="value" id="speed">1.00 m/s</span></div>
+    <div class="row"><span>Travel distance</span><span class="value" id="distance">0 m</span></div>
     <div class="row"><span>Loaded sectors</span><span class="value" id="chunks">0</span></div>
-    <div class="row"><span>Visible stars</span><span class="value" id="stars">0</span></div>
-    <div class="row"><span>Visible nebulas</span><span class="value" id="nebulas">0</span></div>
+    <div class="row"><span>Rendered stars</span><span class="value" id="stars">0</span></div>
+    <div class="row"><span>Rendered nebulas</span><span class="value" id="nebulas">0</span></div>
     <div class="legend">
-      WASD move • Arrow keys look (yaw/pitch) • Z/X speed −/+ • C reset speed
+      WASD = 360° movement • Arrow keys = look • Z/X = slower/faster • C = reset speed
     </div>
   </div>
 
@@ -93,86 +98,117 @@
     (() => {
       const canvas = document.getElementById('space');
       const ctx = canvas.getContext('2d', { alpha: false });
-      const speedEl = document.getElementById('speed');
-      const chunksEl = document.getElementById('chunks');
-      const starsEl = document.getElementById('stars');
-      const nebulasEl = document.getElementById('nebulas');
 
-      const CHUNK_SIZE = 2200;
+      const ui = {
+        speed: document.getElementById('speed'),
+        distance: document.getElementById('distance'),
+        chunks: document.getElementById('chunks'),
+        stars: document.getElementById('stars'),
+        nebulas: document.getElementById('nebulas')
+      };
+
+      const keys = new Set();
+
+      // Core simulation values tuned for responsive movement and efficient rendering.
+      const CHUNK_SIZE = 3000;
       const LOAD_RADIUS = 2;
-      const STAR_BASE_DENSITY = 38;
+      const MAX_DRAW_DIST = CHUNK_SIZE * (LOAD_RADIUS + 1.6);
+      const FOV = Math.PI / 3;
+      const STAR_BASE_DENSITY = 40;
       const NEBULA_BASE_DENSITY = 2;
-      const MAX_DRAW_DISTANCE = CHUNK_SIZE * (LOAD_RADIUS + 1.45);
-      const FOV = Math.PI / 3.0;
 
+      // Exponential speed ladder: starts at 1 m/s and scales up to mega light years / second.
       const SPEED_STEPS = [
-        { label: '1 m/s', mps: 1 },
-        { label: '10 m/s', mps: 10 },
-        { label: '100 m/s', mps: 100 },
-        { label: '1 km/s', mps: 1e3 },
-        { label: '10 km/s', mps: 1e4 },
-        { label: '100 km/s', mps: 1e5 },
-        { label: '1 Mm/s', mps: 1e6 },
-        { label: '10 Mm/s', mps: 1e7 },
-        { label: '100 Mm/s', mps: 1e8 },
-        { label: '1 Gm/s', mps: 1e9 },
-        { label: '1 AU/s', mps: 1.495978707e11 },
-        { label: '1 ly/s', mps: 9.4607e15 },
-        { label: '1 kly/s', mps: 9.4607e18 },
-        { label: '1 Mly/s', mps: 9.4607e21 },
-        { label: '10 Mly/s', mps: 9.4607e22 }
+        1,
+        3,
+        10,
+        30,
+        100,
+        300,
+        1e3,
+        3e3,
+        1e4,
+        3e4,
+        1e5,
+        3e5,
+        1e6,
+        3e6,
+        1e7,
+        3e7,
+        1e8,
+        3e8,
+        1e9,
+        1e10,
+        1e11,
+        1e12,
+        1e13,
+        1e14,
+        1e15,
+        1e16,
+        1e17,
+        1e18,
+        1e19,
+        1e20,
+        1e21,
+        1e22,
+        1e23
       ];
 
+      const CONSTANTS = {
+        AU: 1.495978707e11,
+        LY: 9.4607e15,
+        KLY: 9.4607e18,
+        MLY: 9.4607e21
+      };
+
       const STAR_TYPES = [
-        { name: 'Red Dwarf', color: '#ff7f7f', size: [0.7, 1.35], glow: [2, 4] },
-        { name: 'Yellow Main Sequence', color: '#ffe7a3', size: [0.9, 1.8], glow: [3, 6] },
-        { name: 'Blue Giant', color: '#9ed5ff', size: [1.4, 2.6], glow: [5, 8] },
-        { name: 'White Dwarf', color: '#eef6ff', size: [0.65, 1.25], glow: [2, 4] },
-        { name: 'Orange Giant', color: '#ffc28e', size: [1.2, 2.2], glow: [4, 7] },
-        { name: 'Neutron Star', color: '#cab5ff', size: [0.55, 1.05], glow: [2, 5] }
+        { color: '#ff8484', size: [0.75, 1.35], glow: [2, 4], twinkle: [0.5, 1.5] },
+        { color: '#ffe8a8', size: [0.95, 1.8], glow: [3, 6], twinkle: [0.3, 1.0] },
+        { color: '#9fd5ff', size: [1.4, 2.8], glow: [5, 9], twinkle: [0.35, 1.2] },
+        { color: '#edf5ff', size: [0.65, 1.25], glow: [2, 4], twinkle: [0.7, 1.8] },
+        { color: '#ffc990', size: [1.2, 2.35], glow: [4, 8], twinkle: [0.4, 1.4] },
+        { color: '#ccb5ff', size: [0.55, 1.05], glow: [2, 4], twinkle: [0.8, 2.2] },
+        { color: '#8ef0ff', size: [0.9, 1.7], glow: [2, 5], twinkle: [0.35, 1.25] }
       ];
 
       const NEBULA_TYPES = [
-        { color: '120,180,255', radius: [200, 480], alpha: [0.04, 0.12] },
-        { color: '255,120,220', radius: [180, 440], alpha: [0.04, 0.11] },
-        { color: '130,255,180', radius: [220, 520], alpha: [0.03, 0.10] },
-        { color: '255,200,100', radius: [190, 420], alpha: [0.03, 0.09] }
+        { color: '120,180,255', radius: [240, 620], alpha: [0.03, 0.10] },
+        { color: '255,120,220', radius: [210, 540], alpha: [0.03, 0.09] },
+        { color: '130,255,180', radius: [250, 640], alpha: [0.03, 0.10] },
+        { color: '255,210,120', radius: [220, 560], alpha: [0.02, 0.08] }
       ];
 
-      const keys = new Set();
+      const camera = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 };
+      const world = { chunks: new Map() };
+      const state = { w: 1, h: 1, hw: 0.5, hh: 0.5, focal: 1 };
+
       let speedIndex = 0;
+      let totalTravel = 0;
 
-      const camera = {
-        x: 0,
-        y: 0,
-        z: 0,
-        yaw: 0,
-        pitch: 0
-      };
+      function clamp(v, min, max) {
+        return Math.max(min, Math.min(max, v));
+      }
 
-      const world = {
-        chunks: new Map()
-      };
+      function formatSpeed(mps) {
+        if (mps >= CONSTANTS.MLY) return `${(mps / CONSTANTS.MLY).toFixed(2)} Mly/s`;
+        if (mps >= CONSTANTS.KLY) return `${(mps / CONSTANTS.KLY).toFixed(2)} kly/s`;
+        if (mps >= CONSTANTS.LY) return `${(mps / CONSTANTS.LY).toFixed(2)} ly/s`;
+        if (mps >= CONSTANTS.AU) return `${(mps / CONSTANTS.AU).toFixed(2)} AU/s`;
+        if (mps >= 1e9) return `${(mps / 1e9).toFixed(2)} Gm/s`;
+        if (mps >= 1e6) return `${(mps / 1e6).toFixed(2)} Mm/s`;
+        if (mps >= 1e3) return `${(mps / 1e3).toFixed(2)} km/s`;
+        return `${mps.toFixed(2)} m/s`;
+      }
 
-      const state = {
-        width: 1,
-        height: 1,
-        halfW: 0.5,
-        halfH: 0.5,
-        focalLength: 1
-      };
-
-      function resize() {
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
-        state.width = Math.floor(window.innerWidth * dpr);
-        state.height = Math.floor(window.innerHeight * dpr);
-        canvas.width = state.width;
-        canvas.height = state.height;
-        canvas.style.width = `${window.innerWidth}px`;
-        canvas.style.height = `${window.innerHeight}px`;
-        state.halfW = state.width * 0.5;
-        state.halfH = state.height * 0.5;
-        state.focalLength = state.halfW / Math.tan(FOV * 0.5);
+      function formatDistance(meters) {
+        if (meters >= CONSTANTS.MLY) return `${(meters / CONSTANTS.MLY).toFixed(3)} Mly`;
+        if (meters >= CONSTANTS.KLY) return `${(meters / CONSTANTS.KLY).toFixed(3)} kly`;
+        if (meters >= CONSTANTS.LY) return `${(meters / CONSTANTS.LY).toFixed(3)} ly`;
+        if (meters >= CONSTANTS.AU) return `${(meters / CONSTANTS.AU).toFixed(3)} AU`;
+        if (meters >= 1e9) return `${(meters / 1e9).toFixed(2)} Gm`;
+        if (meters >= 1e6) return `${(meters / 1e6).toFixed(2)} Mm`;
+        if (meters >= 1e3) return `${(meters / 1e3).toFixed(2)} km`;
+        return `${meters.toFixed(1)} m`;
       }
 
       function hash32(x, y, z) {
@@ -185,7 +221,7 @@
         return h >>> 0;
       }
 
-      function makeRng(seed) {
+      function createRng(seed) {
         let s = seed >>> 0;
         return () => {
           s += 0x6d2b79f5;
@@ -196,63 +232,20 @@
         };
       }
 
-      function pickRange(rng, min, max) {
+      function randomRange(rng, min, max) {
         return min + (max - min) * rng();
-      }
-
-      function generateChunk(cx, cy, cz) {
-        const seed = hash32(cx, cy, cz);
-        const rng = makeRng(seed);
-        const baseX = cx * CHUNK_SIZE;
-        const baseY = cy * CHUNK_SIZE;
-        const baseZ = cz * CHUNK_SIZE;
-
-        const stars = [];
-        const nebulas = [];
-
-        const starCount = STAR_BASE_DENSITY + Math.floor(rng() * STAR_BASE_DENSITY * 1.1);
-        const nebulaCount = NEBULA_BASE_DENSITY + Math.floor(rng() * 2);
-
-        for (let i = 0; i < starCount; i++) {
-          const t = STAR_TYPES[Math.floor(rng() * STAR_TYPES.length)];
-          stars.push({
-            x: baseX + rng() * CHUNK_SIZE,
-            y: baseY + rng() * CHUNK_SIZE,
-            z: baseZ + rng() * CHUNK_SIZE,
-            color: t.color,
-            size: pickRange(rng, t.size[0], t.size[1]),
-            glow: pickRange(rng, t.glow[0], t.glow[1]),
-            twinklePhase: rng() * Math.PI * 2,
-            twinkleRate: pickRange(rng, 0.5, 1.8)
-          });
-        }
-
-        for (let i = 0; i < nebulaCount; i++) {
-          const t = NEBULA_TYPES[Math.floor(rng() * NEBULA_TYPES.length)];
-          nebulas.push({
-            x: baseX + rng() * CHUNK_SIZE,
-            y: baseY + rng() * CHUNK_SIZE,
-            z: baseZ + rng() * CHUNK_SIZE,
-            color: t.color,
-            radius: pickRange(rng, t.radius[0], t.radius[1]),
-            alpha: pickRange(rng, t.alpha[0], t.alpha[1])
-          });
-        }
-
-        return { stars, nebulas };
       }
 
       function chunkKey(x, y, z) {
         return `${x},${y},${z}`;
       }
 
-      function updateChunks() {
+      function ensureChunks() {
         const cx = Math.floor(camera.x / CHUNK_SIZE);
         const cy = Math.floor(camera.y / CHUNK_SIZE);
         const cz = Math.floor(camera.z / CHUNK_SIZE);
 
         const needed = new Set();
-
         for (let x = cx - LOAD_RADIUS; x <= cx + LOAD_RADIUS; x++) {
           for (let y = cy - LOAD_RADIUS; y <= cy + LOAD_RADIUS; y++) {
             for (let z = cz - LOAD_RADIUS; z <= cz + LOAD_RADIUS; z++) {
@@ -266,30 +259,79 @@
         }
 
         for (const key of world.chunks.keys()) {
-          if (!needed.has(key)) {
-            world.chunks.delete(key);
-          }
+          if (!needed.has(key)) world.chunks.delete(key);
         }
       }
 
-      function getBasis() {
+      function generateChunk(cx, cy, cz) {
+        const seed = hash32(cx, cy, cz);
+        const rng = createRng(seed);
+        const baseX = cx * CHUNK_SIZE;
+        const baseY = cy * CHUNK_SIZE;
+        const baseZ = cz * CHUNK_SIZE;
+
+        const stars = [];
+        const nebulas = [];
+
+        const starCount = STAR_BASE_DENSITY + Math.floor(rng() * STAR_BASE_DENSITY);
+        const nebulaCount = NEBULA_BASE_DENSITY + Math.floor(rng() * 3);
+
+        for (let i = 0; i < starCount; i++) {
+          const t = STAR_TYPES[Math.floor(rng() * STAR_TYPES.length)];
+          stars.push({
+            x: baseX + rng() * CHUNK_SIZE,
+            y: baseY + rng() * CHUNK_SIZE,
+            z: baseZ + rng() * CHUNK_SIZE,
+            color: t.color,
+            size: randomRange(rng, t.size[0], t.size[1]),
+            glow: randomRange(rng, t.glow[0], t.glow[1]),
+            twinklePhase: rng() * Math.PI * 2,
+            twinkleRate: randomRange(rng, t.twinkle[0], t.twinkle[1])
+          });
+        }
+
+        for (let i = 0; i < nebulaCount; i++) {
+          const n = NEBULA_TYPES[Math.floor(rng() * NEBULA_TYPES.length)];
+          nebulas.push({
+            x: baseX + rng() * CHUNK_SIZE,
+            y: baseY + rng() * CHUNK_SIZE,
+            z: baseZ + rng() * CHUNK_SIZE,
+            radius: randomRange(rng, n.radius[0], n.radius[1]),
+            alpha: randomRange(rng, n.alpha[0], n.alpha[1]),
+            color: n.color
+          });
+        }
+
+        return { stars, nebulas };
+      }
+
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        state.w = Math.floor(window.innerWidth * dpr);
+        state.h = Math.floor(window.innerHeight * dpr);
+        state.hw = state.w * 0.5;
+        state.hh = state.h * 0.5;
+        state.focal = state.hw / Math.tan(FOV * 0.5);
+
+        canvas.width = state.w;
+        canvas.height = state.h;
+        canvas.style.width = `${window.innerWidth}px`;
+        canvas.style.height = `${window.innerHeight}px`;
+      }
+
+      function getBasisVectors() {
         const cp = Math.cos(camera.pitch);
         const sp = Math.sin(camera.pitch);
         const cy = Math.cos(camera.yaw);
         const sy = Math.sin(camera.yaw);
 
+        // Right-handed basis.
         const forward = { x: sy * cp, y: sp, z: cy * cp };
         const right = { x: cy, y: 0, z: -sy };
-        const up = {
-          x: right.y * forward.z - right.z * forward.y,
-          y: right.z * forward.x - right.x * forward.z,
-          z: right.x * forward.y - right.y * forward.x
-        };
-
-        return { forward, right, up };
+        return { forward, right };
       }
 
-      function cameraProject(wx, wy, wz) {
+      function projectPoint(wx, wy, wz) {
         const dx = wx - camera.x;
         const dy = wy - camera.y;
         const dz = wz - camera.z;
@@ -299,40 +341,38 @@
         const cp = Math.cos(-camera.pitch);
         const sp = Math.sin(-camera.pitch);
 
-        const xzX = dx * cy - dz * sy;
-        const xzZ = dx * sy + dz * cy;
+        const x1 = dx * cy - dz * sy;
+        const z1 = dx * sy + dz * cy;
+        const y2 = dy * cp - z1 * sp;
+        const z2 = dy * sp + z1 * cp;
 
-        const yzY = dy * cp - xzZ * sp;
-        const yzZ = dy * sp + xzZ * cp;
+        if (z2 < 0.1) return null;
 
-        if (yzZ <= 0.1) return null;
+        const sx = state.hw + (x1 / z2) * state.focal;
+        const sy2 = state.hh - (y2 / z2) * state.focal;
 
-        const sx = state.halfW + (xzX / yzZ) * state.focalLength;
-        const sy2 = state.halfH - (yzY / yzZ) * state.focalLength;
+        if (sx < -80 || sx > state.w + 80 || sy2 < -80 || sy2 > state.h + 80) return null;
 
-        if (sx < -80 || sx > state.width + 80 || sy2 < -80 || sy2 > state.height + 80) {
-          return null;
-        }
-
-        return { x: sx, y: sy2, depth: yzZ };
+        return { x: sx, y: sy2, depth: z2 };
       }
 
-      function drawSkyGradient() {
-        const g = ctx.createLinearGradient(0, 0, 0, state.height);
-        g.addColorStop(0, '#060d20');
-        g.addColorStop(0.55, '#040916');
-        g.addColorStop(1, '#02040c');
-        ctx.fillStyle = g;
-        ctx.fillRect(0, 0, state.width, state.height);
+      function drawBackground() {
+        const grad = ctx.createLinearGradient(0, 0, 0, state.h);
+        grad.addColorStop(0, '#060f25');
+        grad.addColorStop(0.5, '#040917');
+        grad.addColorStop(1, '#02040b');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, state.w, state.h);
       }
 
-      function drawFrame(timeSec) {
-        drawSkyGradient();
+      function draw(timeSec) {
+        drawBackground();
 
-        let starsVisible = 0;
-        let nebulasVisible = 0;
+        const maxDrawSq = MAX_DRAW_DIST * MAX_DRAW_DIST;
+        let visibleStars = 0;
+        let visibleNebulas = 0;
 
-        const maxDistSq = MAX_DRAW_DISTANCE * MAX_DRAW_DISTANCE;
+        ctx.globalCompositeOperation = 'lighter';
 
         for (const chunk of world.chunks.values()) {
           for (const n of chunk.nebulas) {
@@ -340,23 +380,22 @@
             const dy = n.y - camera.y;
             const dz = n.z - camera.z;
             const distSq = dx * dx + dy * dy + dz * dz;
-            if (distSq > maxDistSq * 1.6) continue;
+            if (distSq > maxDrawSq * 1.9) continue;
 
-            const p = cameraProject(n.x, n.y, n.z);
+            const p = projectPoint(n.x, n.y, n.z);
             if (!p) continue;
 
-            const radius = Math.max(18, (n.radius / p.depth) * state.focalLength);
-            const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius);
-            grad.addColorStop(0, `rgba(${n.color}, ${n.alpha})`);
-            grad.addColorStop(0.7, `rgba(${n.color}, ${n.alpha * 0.22})`);
-            grad.addColorStop(1, `rgba(${n.color}, 0)`);
+            const radius = Math.max(20, (n.radius / p.depth) * state.focal);
+            const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius);
+            g.addColorStop(0, `rgba(${n.color}, ${n.alpha})`);
+            g.addColorStop(0.7, `rgba(${n.color}, ${n.alpha * 0.25})`);
+            g.addColorStop(1, `rgba(${n.color}, 0)`);
 
-            ctx.globalCompositeOperation = 'lighter';
-            ctx.fillStyle = grad;
+            ctx.fillStyle = g;
             ctx.beginPath();
             ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
             ctx.fill();
-            nebulasVisible++;
+            visibleNebulas++;
           }
         }
 
@@ -366,24 +405,23 @@
             const dy = s.y - camera.y;
             const dz = s.z - camera.z;
             const distSq = dx * dx + dy * dy + dz * dz;
-            if (distSq > maxDistSq) continue;
+            if (distSq > maxDrawSq) continue;
 
-            const p = cameraProject(s.x, s.y, s.z);
+            const p = projectPoint(s.x, s.y, s.z);
             if (!p) continue;
 
-            const twinkle = 0.6 + 0.4 * Math.sin(timeSec * s.twinkleRate + s.twinklePhase);
-            const size = Math.max(0.9, (s.size / p.depth) * state.focalLength * 2.8);
-            const glow = Math.max(1.8, (s.glow / p.depth) * state.focalLength * 5.4);
+            const twinkle = 0.65 + 0.35 * Math.sin(timeSec * s.twinkleRate + s.twinklePhase);
+            const starSize = Math.max(0.85, (s.size / p.depth) * state.focal * 2.9);
+            const glow = Math.max(1.4, (s.glow / p.depth) * state.focal * 5.5);
 
-            ctx.globalCompositeOperation = 'lighter';
             ctx.shadowBlur = glow;
             ctx.shadowColor = s.color;
-            ctx.fillStyle = s.color;
             ctx.globalAlpha = twinkle;
+            ctx.fillStyle = s.color;
             ctx.beginPath();
-            ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+            ctx.arc(p.x, p.y, starSize, 0, Math.PI * 2);
             ctx.fill();
-            starsVisible++;
+            visibleStars++;
           }
         }
 
@@ -391,117 +429,117 @@
         ctx.shadowBlur = 0;
         ctx.globalCompositeOperation = 'source-over';
 
-        // subtle crosshair
-        ctx.strokeStyle = 'rgba(150, 220, 255, 0.18)';
+        // Small center reticle.
+        ctx.strokeStyle = 'rgba(158, 223, 255, 0.22)';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(state.halfW - 9, state.halfH);
-        ctx.lineTo(state.halfW + 9, state.halfH);
-        ctx.moveTo(state.halfW, state.halfH - 9);
-        ctx.lineTo(state.halfW, state.halfH + 9);
+        ctx.moveTo(state.hw - 8, state.hh);
+        ctx.lineTo(state.hw + 8, state.hh);
+        ctx.moveTo(state.hw, state.hh - 8);
+        ctx.lineTo(state.hw, state.hh + 8);
         ctx.stroke();
 
-        starsEl.textContent = starsVisible.toLocaleString();
-        nebulasEl.textContent = nebulasVisible.toLocaleString();
-        chunksEl.textContent = world.chunks.size.toLocaleString();
+        ui.stars.textContent = visibleStars.toLocaleString();
+        ui.nebulas.textContent = visibleNebulas.toLocaleString();
+        ui.chunks.textContent = world.chunks.size.toLocaleString();
+      }
+
+      function setSpeedIndex(index) {
+        speedIndex = clamp(index, 0, SPEED_STEPS.length - 1);
+        ui.speed.textContent = formatSpeed(SPEED_STEPS[speedIndex]);
       }
 
       function update(dt) {
-        const lookSpeed = 1.15;
-        if (keys.has('ArrowLeft')) camera.yaw += lookSpeed * dt;
-        if (keys.has('ArrowRight')) camera.yaw -= lookSpeed * dt;
-        if (keys.has('ArrowUp')) camera.pitch += lookSpeed * dt;
-        if (keys.has('ArrowDown')) camera.pitch -= lookSpeed * dt;
+        const lookRate = 1.2;
+        if (keys.has('ArrowLeft')) camera.yaw += lookRate * dt;
+        if (keys.has('ArrowRight')) camera.yaw -= lookRate * dt;
+        if (keys.has('ArrowUp')) camera.pitch += lookRate * dt;
+        if (keys.has('ArrowDown')) camera.pitch -= lookRate * dt;
 
-        const maxPitch = Math.PI / 2 - 0.02;
-        camera.pitch = Math.max(-maxPitch, Math.min(maxPitch, camera.pitch));
+        camera.pitch = clamp(camera.pitch, -Math.PI / 2 + 0.02, Math.PI / 2 - 0.02);
 
-        const { forward, right } = getBasis();
-        const speed = SPEED_STEPS[speedIndex].mps;
+        const { forward, right } = getBasisVectors();
 
-        let mx = 0, my = 0, mz = 0;
+        let vx = 0;
+        let vy = 0;
+        let vz = 0;
 
         if (keys.has('w')) {
-          mx += forward.x;
-          my += forward.y;
-          mz += forward.z;
+          vx += forward.x;
+          vy += forward.y;
+          vz += forward.z;
         }
         if (keys.has('s')) {
-          mx -= forward.x;
-          my -= forward.y;
-          mz -= forward.z;
+          vx -= forward.x;
+          vy -= forward.y;
+          vz -= forward.z;
         }
         if (keys.has('a')) {
-          mx -= right.x;
-          my -= right.y;
-          mz -= right.z;
+          vx -= right.x;
+          vz -= right.z;
         }
         if (keys.has('d')) {
-          mx += right.x;
-          my += right.y;
-          mz += right.z;
+          vx += right.x;
+          vz += right.z;
         }
 
-        const len = Math.hypot(mx, my, mz);
-        if (len > 0) {
-          mx /= len;
-          my /= len;
-          mz /= len;
-          camera.x += mx * speed * dt;
-          camera.y += my * speed * dt;
-          camera.z += mz * speed * dt;
+        const speed = SPEED_STEPS[speedIndex];
+        const length = Math.hypot(vx, vy, vz);
+
+        if (length > 0) {
+          vx /= length;
+          vy /= length;
+          vz /= length;
+
+          const distanceThisFrame = speed * dt;
+          camera.x += vx * distanceThisFrame;
+          camera.y += vy * distanceThisFrame;
+          camera.z += vz * distanceThisFrame;
+          totalTravel += distanceThisFrame;
         }
 
-        updateChunks();
+        ui.distance.textContent = formatDistance(totalTravel);
+
+        ensureChunks();
       }
 
-      function setSpeed(index) {
-        speedIndex = Math.max(0, Math.min(SPEED_STEPS.length - 1, index));
-        speedEl.textContent = SPEED_STEPS[speedIndex].label;
+      function isHandledMoveKey(key) {
+        return key === 'ArrowLeft' || key === 'ArrowRight' || key === 'ArrowUp' || key === 'ArrowDown' || key === 'w' || key === 'a' || key === 's' || key === 'd';
       }
 
-      window.addEventListener('keydown', (e) => {
-        const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-        keys.add(k);
+      window.addEventListener('keydown', (event) => {
+        const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+        keys.add(key);
 
-        if (k === 'x') setSpeed(speedIndex + 1);
-        if (k === 'z') setSpeed(speedIndex - 1);
-        if (k === 'c') setSpeed(0);
+        if (key === 'x') setSpeedIndex(speedIndex + 1);
+        if (key === 'z') setSpeedIndex(speedIndex - 1);
+        if (key === 'c') setSpeedIndex(0);
 
-        if (
-          k === 'ArrowLeft' ||
-          k === 'ArrowRight' ||
-          k === 'ArrowUp' ||
-          k === 'ArrowDown' ||
-          k === 'w' ||
-          k === 'a' ||
-          k === 's' ||
-          k === 'd'
-        ) {
-          e.preventDefault();
-        }
+        if (isHandledMoveKey(key)) event.preventDefault();
       });
 
-      window.addEventListener('keyup', (e) => {
-        const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-        keys.delete(k);
+      window.addEventListener('keyup', (event) => {
+        const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+        keys.delete(key);
       });
 
       window.addEventListener('resize', resize);
 
       resize();
-      setSpeed(0);
-      updateChunks();
+      setSpeedIndex(0);
+      ensureChunks();
 
-      let last = performance.now();
+      let previous = performance.now();
       function frame(now) {
-        const dt = Math.min(0.05, (now - last) / 1000);
-        last = now;
+        const dt = Math.min((now - previous) / 1000, 0.05);
+        previous = now;
 
         update(dt);
-        drawFrame(now / 1000);
+        draw(now / 1000);
+
         requestAnimationFrame(frame);
       }
+
       requestAnimationFrame(frame);
     })();
   </script>
