@@ -90,7 +90,7 @@
     <div class="row"><span>Rendered stars</span><span class="value" id="stars">0</span></div>
     <div class="row"><span>Rendered nebulas</span><span class="value" id="nebulas">0</span></div>
     <div class="legend">
-      WASD = 360° movement • Arrow keys = look • Z/X = slower/faster • C = reset speed
+      WASD = 360° movement • Arrow keys = look • L/P = slower/faster • C = reset speed
     </div>
   </div>
 
@@ -511,11 +511,14 @@
         const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
         keys.add(key);
 
-        if (key === 'x') setSpeedIndex(speedIndex + 1);
-        if (key === 'z') setSpeedIndex(speedIndex - 1);
-        if (key === 'c') setSpeedIndex(0);
+        // Use physical key codes for reliability across keyboard layouts.
+        if (event.code === 'KeyP') setSpeedIndex(speedIndex + 1);
+        if (event.code === 'KeyL') setSpeedIndex(speedIndex - 1);
+        if (event.code === 'KeyC') setSpeedIndex(0);
 
-        if (isHandledMoveKey(key)) event.preventDefault();
+        if (isHandledMoveKey(key) || event.code === 'KeyP' || event.code === 'KeyL' || event.code === 'KeyC') {
+          event.preventDefault();
+        }
       });
 
       window.addEventListener('keyup', (event) => {
