@@ -92,6 +92,7 @@
     <div class="row"><span>Rendered stars</span><span class="value" id="stars">0</span></div>
     <div class="row"><span>Rendered nebulas</span><span class="value" id="nebulas">0</span></div>
     <div class="row"><span>Rendered galaxies</span><span class="value" id="galaxies">0</span></div>
+    <div class="row"><span>FPS</span><span class="value" id="fps">0</span></div>
     <div class="legend">
 Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back relative to view • A=right D=left • Hold P/L to accelerate speed • C = reset
     </div>
@@ -110,7 +111,8 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
         chunks: document.getElementById('chunks'),
         stars: document.getElementById('stars'),
         nebulas: document.getElementById('nebulas'),
-        galaxies: document.getElementById('galaxies')
+        galaxies: document.getElementById('galaxies'),
+        fps: document.getElementById('fps')
       };
 
       const keys = new Set();
@@ -169,6 +171,7 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
 
       let speedIndex = 0;
       let totalTravel = 0;
+      let fpsState = { elapsed: 0, frames: 0, value: 0 };
       const speedHold = {
         plus: { held: false, time: 0, fired: false },
         minus: { held: false, time: 0, fired: false }
@@ -384,6 +387,44 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
         ctx.fillRect(0, 0, state.w, state.h);
       }
 
+      function drawDistantStarfield(timeSec) {
+        // Tiny deterministic backdrop stars for depth and cleaner visuals.
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        ctx.globalAlpha = 0.35;
+        const layers = 3;
+        for (let layer = 0; layer < layers; layer++) {
+          const parallax = 0.15 + layer * 0.18;
+          const count = 120 + layer * 80;
+          for (let i = 0; i < count; i++) {
+            const a = (i * 12.9898 + layer * 78.233) % 6.28318;
+            const b = (i * 78.233 + layer * 45.123) % 6.28318;
+            const x = (Math.sin(a + camera.yaw * parallax + timeSec * 0.004 * (layer + 1)) * 0.5 + 0.5) * state.w;
+            const y = (Math.cos(b + camera.pitch * parallax) * 0.5 + 0.5) * state.h;
+            const r = 0.5 + layer * 0.35;
+            ctx.fillStyle = layer === 2 ? 'rgba(180,210,255,0.45)' : 'rgba(220,230,255,0.32)';
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
+      }
+
+      function drawPostFX() {
+        // Mild vignette + bloom pass for richer space visuals at low cost.
+        const vignette = ctx.createRadialGradient(state.hw, state.hh, state.h * 0.1, state.hw, state.hh, Math.max(state.w, state.h) * 0.72);
+        vignette.addColorStop(0, 'rgba(0,0,0,0)');
+        vignette.addColorStop(1, 'rgba(0,0,0,0.32)');
+        ctx.fillStyle = vignette;
+        ctx.fillRect(0, 0, state.w, state.h);
+
+        ctx.globalCompositeOperation = 'screen';
+        ctx.fillStyle = 'rgba(25,45,95,0.08)';
+        ctx.fillRect(0, 0, state.w, state.h);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
       function drawVolumetricHaze(timeSec) {
         // Layered full-screen fog slices to emulate cheap volumetric scattering.
         ctx.globalCompositeOperation = 'screen';
@@ -438,6 +479,7 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
 
       function draw(timeSec) {
         drawBackground();
+        drawDistantStarfield(timeSec);
         drawVolumetricHaze(timeSec);
 
         const maxDrawSq = MAX_DRAW_DIST * MAX_DRAW_DIST;
@@ -542,6 +584,8 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
         ctx.lineTo(state.hw, state.hh + 8);
         ctx.stroke();
 
+        drawPostFX();
+
         ui.stars.textContent = visibleStars.toLocaleString();
         ui.nebulas.textContent = visibleNebulas.toLocaleString();
         ui.galaxies.textContent = visibleGalaxies.toLocaleString();
@@ -631,6 +675,17 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
 
         accelerate(speedHold.plus, +1);
         accelerate(speedHold.minus, -1);
+      }
+
+      function updateFPS(dt) {
+        fpsState.elapsed += dt;
+        fpsState.frames += 1;
+        if (fpsState.elapsed >= 0.25) {
+          fpsState.value = fpsState.frames / fpsState.elapsed;
+          ui.fps.textContent = fpsState.value.toFixed(0);
+          fpsState.elapsed = 0;
+          fpsState.frames = 0;
+        }
       }
 
       function update(dt, nowSec) {
@@ -784,6 +839,7 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
         previous = now;
 
         update(dt, now / 1000);
+        updateFPS(dt);
         draw(now / 1000);
 
         requestAnimationFrame(frame);
