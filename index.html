@@ -93,7 +93,7 @@
     <div class="row"><span>Rendered nebulas</span><span class="value" id="nebulas">0</span></div>
     <div class="row"><span>Rendered galaxies</span><span class="value" id="galaxies">0</span></div>
     <div class="legend">
-      Click/Tap star to select • T = 5s warp to selected star • WASD = move • Arrow keys = look • L/P = slower/faster • C = reset
+Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back relative to view • A=right D=left • Hold P/L to accelerate speed • C = reset
     </div>
   </div>
 
@@ -117,11 +117,12 @@
 
       // Space-engine-like rendering approach: chunked procedural universe, aggressive culling,
       // layered volumetric billboards and macro-structure (galaxies) to fake huge scale cheaply.
-      const CHUNK_SIZE = 3200;
+      const CHUNK_SIZE = 8e11; // 800 billion meters (~5.35 AU)
       const LOAD_RADIUS = 2;
       const MAX_DRAW_DIST = CHUNK_SIZE * (LOAD_RADIUS + 1.8);
+      const VISUAL_SCALE = 2.5e9; // meters per visual unit for rendering
       const FOV = Math.PI / 3;
-      const STAR_BASE_DENSITY = 40;
+      const STAR_BASE_DENSITY = 42;
       const NEBULA_BASE_DENSITY = 2;
       const GALAXY_BASE_DENSITY = 1;
 
@@ -150,16 +151,16 @@
       ];
 
       const NEBULA_TYPES = [
-        { color: '120,180,255', radius: [260, 660], alpha: [0.03, 0.10] },
-        { color: '255,120,220', radius: [230, 580], alpha: [0.03, 0.09] },
-        { color: '130,255,180', radius: [250, 680], alpha: [0.03, 0.10] },
-        { color: '255,210,120', radius: [230, 590], alpha: [0.02, 0.08] }
+        { color: '120,180,255', radius: [8e10, 2.2e11], alpha: [0.03, 0.10] },
+        { color: '255,120,220', radius: [7e10, 1.9e11], alpha: [0.03, 0.09] },
+        { color: '130,255,180', radius: [9e10, 2.4e11], alpha: [0.03, 0.10] },
+        { color: '255,210,120', radius: [7e10, 2.0e11], alpha: [0.02, 0.08] }
       ];
 
       const GALAXY_TYPES = [
-        { name: 'Spiral', core: '150,200,255', arm: '100,150,255', radius: [3200, 6200], alpha: [0.025, 0.06] },
-        { name: 'Barred Spiral', core: '255,200,150', arm: '255,130,190', radius: [3000, 5600], alpha: [0.022, 0.055] },
-        { name: 'Elliptical', core: '240,240,255', arm: '170,170,210', radius: [2800, 5200], alpha: [0.02, 0.05] }
+        { name: 'Spiral', core: '150,200,255', arm: '100,150,255', radius: [5e11, 1.4e12], alpha: [0.025, 0.06] },
+        { name: 'Barred Spiral', core: '255,200,150', arm: '255,130,190', radius: [4e11, 1.1e12], alpha: [0.022, 0.055] },
+        { name: 'Elliptical', core: '240,240,255', arm: '170,170,210', radius: [4e11, 1.0e12], alpha: [0.02, 0.05] }
       ];
 
       const camera = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 };
@@ -168,6 +169,10 @@
 
       let speedIndex = 0;
       let totalTravel = 0;
+      const speedHold = {
+        plus: { held: false, time: 0, fired: false },
+        minus: { held: false, time: 0, fired: false }
+      };
       let selectedStarId = null;
       let selectedStarData = null;
       let renderedStars = [];
@@ -346,9 +351,9 @@
       }
 
       function projectPoint(wx, wy, wz) {
-        const dx = wx - camera.x;
-        const dy = wy - camera.y;
-        const dz = wz - camera.z;
+        const dx = (wx - camera.x) / VISUAL_SCALE;
+        const dy = (wy - camera.y) / VISUAL_SCALE;
+        const dz = (wz - camera.z) / VISUAL_SCALE;
 
         const cy = Math.cos(-camera.yaw);
         const sy = Math.sin(-camera.yaw);
@@ -496,8 +501,8 @@
             if (!p) continue;
 
             const twinkle = 0.65 + 0.35 * Math.sin(timeSec * s.twinkleRate + s.twinklePhase);
-            const starSize = Math.max(0.85, (s.size / p.depth) * state.focal * 2.9);
-            const glow = Math.max(1.4, (s.glow / p.depth) * state.focal * 5.5);
+            const starSize = Math.max(0.85, (s.size / p.depth) * state.focal * 3.4);
+            const glow = Math.max(1.4, (s.glow / p.depth) * state.focal * 6.5);
 
             renderedStars.push({
               id: s.id,
@@ -603,8 +608,34 @@
         }
       }
 
+      function applyHeldSpeedControls(dt) {
+        const accelerate = (bucket, direction) => {
+          if (!bucket.held) {
+            bucket.time = 0;
+            bucket.fired = false;
+            return;
+          }
+
+          bucket.time += dt;
+          // Repeats faster the longer key is held; jump size also increases with hold time.
+          const repeatInterval = Math.max(0.035, 0.22 / (1 + bucket.time * 2.7));
+          if (!bucket.nextAt) bucket.nextAt = 0;
+
+          while (bucket.time >= bucket.nextAt) {
+            const jump = Math.min(8, 1 + Math.floor(bucket.time * 3.2));
+            setSpeedIndex(speedIndex + direction * jump);
+            bucket.fired = true;
+            bucket.nextAt += repeatInterval;
+          }
+        };
+
+        accelerate(speedHold.plus, +1);
+        accelerate(speedHold.minus, -1);
+      }
+
       function update(dt, nowSec) {
         updateTeleport(nowSec);
+        applyHeldSpeedControls(dt);
 
         const lookRate = 1.2;
         if (keys.has('ArrowLeft')) camera.yaw += lookRate * dt;
@@ -631,13 +662,14 @@
             vy -= forward.y;
             vz -= forward.z;
           }
+          // Requested mapping: A strafes right, D strafes left.
           if (keys.has('KeyA')) {
-            vx -= right.x;
-            vz -= right.z;
-          }
-          if (keys.has('KeyD')) {
             vx += right.x;
             vz += right.z;
+          }
+          if (keys.has('KeyD')) {
+            vx -= right.x;
+            vz -= right.z;
           }
 
           const speed = SPEED_STEPS[speedIndex];
@@ -702,8 +734,18 @@
         keys.add(event.code);
 
         if (!event.repeat) {
-          if (event.code === 'KeyP') setSpeedIndex(speedIndex + 1);
-          if (event.code === 'KeyL') setSpeedIndex(speedIndex - 1);
+          if (event.code === 'KeyP') {
+            speedHold.plus.held = true;
+            speedHold.plus.time = 0;
+            speedHold.plus.nextAt = 0;
+            setSpeedIndex(speedIndex + 1);
+          }
+          if (event.code === 'KeyL') {
+            speedHold.minus.held = true;
+            speedHold.minus.time = 0;
+            speedHold.minus.nextAt = 0;
+            setSpeedIndex(speedIndex - 1);
+          }
           if (event.code === 'KeyC') setSpeedIndex(0);
           if (event.code === 'KeyT') startTeleport(performance.now() / 1000);
         }
@@ -713,6 +755,14 @@
 
       document.addEventListener('keyup', (event) => {
         keys.delete(event.code);
+        if (event.code === 'KeyP') {
+          speedHold.plus.held = false;
+          speedHold.plus.nextAt = 0;
+        }
+        if (event.code === 'KeyL') {
+          speedHold.minus.held = false;
+          speedHold.minus.nextAt = 0;
+        }
       });
 
       canvas.addEventListener('pointerdown', (event) => {
