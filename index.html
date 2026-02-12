@@ -120,13 +120,13 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
       // Space-engine-like rendering approach: chunked procedural universe, aggressive culling,
       // layered volumetric billboards and macro-structure (galaxies) to fake huge scale cheaply.
       const CHUNK_SIZE = 8e11; // 800 billion meters (~5.35 AU)
-      const LOAD_RADIUS = 2;
+      const LOAD_RADIUS = 1;
       const MAX_DRAW_DIST = CHUNK_SIZE * (LOAD_RADIUS + 1.8);
       const VISUAL_SCALE = 2.5e9; // meters per visual unit for rendering
       const FOV = Math.PI / 3;
-      const STAR_BASE_DENSITY = 42;
+      const STAR_BASE_DENSITY = 24;
       const NEBULA_BASE_DENSITY = 2;
-      const GALAXY_BASE_DENSITY = 1;
+      const GALAXY_BASE_DENSITY = 0;
 
       const SPEED_STEPS = [
         1, 3, 10, 30, 100, 300, 1e3, 3e3, 1e4, 3e4,
@@ -179,6 +179,8 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
       let selectedStarId = null;
       let selectedStarData = null;
       let renderedStars = [];
+      let lastChunkKey = null;
+      const RENDER_BUDGET = { stars: 1200, nebulas: 90, galaxies: 24 };
 
       let teleport = {
         active: false,
@@ -279,7 +281,7 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
 
         const starCount = STAR_BASE_DENSITY + Math.floor(rng() * STAR_BASE_DENSITY);
         const nebulaCount = NEBULA_BASE_DENSITY + Math.floor(rng() * 3);
-        const galaxyCount = GALAXY_BASE_DENSITY + Math.floor(rng() * 2);
+        const galaxyCount = GALAXY_BASE_DENSITY + Math.floor(rng() * 2); // 0..1 mostly to reduce overdraw
 
         for (let i = 0; i < starCount; i++) {
           const t = STAR_TYPES[Math.floor(rng() * STAR_TYPES.length)];
@@ -388,21 +390,21 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
       }
 
       function drawDistantStarfield(timeSec) {
-        // Tiny deterministic backdrop stars for depth and cleaner visuals.
+        // Low-overdraw background star dome (Space Engine style distant shell illusion).
         ctx.save();
         ctx.globalCompositeOperation = 'screen';
-        ctx.globalAlpha = 0.35;
-        const layers = 3;
+        ctx.globalAlpha = 0.14;
+        const layers = 2;
         for (let layer = 0; layer < layers; layer++) {
-          const parallax = 0.15 + layer * 0.18;
-          const count = 120 + layer * 80;
+          const parallax = 0.12 + layer * 0.16;
+          const count = 80 + layer * 60;
           for (let i = 0; i < count; i++) {
             const a = (i * 12.9898 + layer * 78.233) % 6.28318;
             const b = (i * 78.233 + layer * 45.123) % 6.28318;
-            const x = (Math.sin(a + camera.yaw * parallax + timeSec * 0.004 * (layer + 1)) * 0.5 + 0.5) * state.w;
+            const x = (Math.sin(a + camera.yaw * parallax + timeSec * 0.0025 * (layer + 1)) * 0.5 + 0.5) * state.w;
             const y = (Math.cos(b + camera.pitch * parallax) * 0.5 + 0.5) * state.h;
-            const r = 0.5 + layer * 0.35;
-            ctx.fillStyle = layer === 2 ? 'rgba(180,210,255,0.45)' : 'rgba(220,230,255,0.32)';
+            const r = 0.45 + layer * 0.25;
+            ctx.fillStyle = layer === 1 ? 'rgba(170,205,255,0.25)' : 'rgba(220,230,255,0.2)';
             ctx.beginPath();
             ctx.arc(x, y, r, 0, Math.PI * 2);
             ctx.fill();
@@ -412,17 +414,12 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
       }
 
       function drawPostFX() {
-        // Mild vignette + bloom pass for richer space visuals at low cost.
+        // Dark-space tonemapping style pass: vignette only (avoid white wash).
         const vignette = ctx.createRadialGradient(state.hw, state.hh, state.h * 0.1, state.hw, state.hh, Math.max(state.w, state.h) * 0.72);
         vignette.addColorStop(0, 'rgba(0,0,0,0)');
-        vignette.addColorStop(1, 'rgba(0,0,0,0.32)');
+        vignette.addColorStop(1, 'rgba(0,0,0,0.38)');
         ctx.fillStyle = vignette;
         ctx.fillRect(0, 0, state.w, state.h);
-
-        ctx.globalCompositeOperation = 'screen';
-        ctx.fillStyle = 'rgba(25,45,95,0.08)';
-        ctx.fillRect(0, 0, state.w, state.h);
-        ctx.globalCompositeOperation = 'source-over';
       }
 
       function drawVolumetricHaze(timeSec) {
@@ -443,7 +440,7 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
       }
 
       function drawGalaxy(g, p, timeSec) {
-        const radius = Math.max(25, (g.radius / p.depth) * state.focal);
+        const radius = clamp((g.radius / p.depth) * state.focal, 20, Math.min(state.w, state.h) * 0.48);
         const angle = g.spin * timeSec * 0.03;
 
         ctx.save();
@@ -486,6 +483,9 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
         let visibleStars = 0;
         let visibleNebulas = 0;
         let visibleGalaxies = 0;
+        let drawnStars = 0;
+        let drawnNebulas = 0;
+        let drawnGalaxies = 0;
         renderedStars = [];
 
         ctx.globalCompositeOperation = 'lighter';
@@ -501,8 +501,10 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
 
             const p = projectPoint(g.x, g.y, g.z);
             if (!p) continue;
+            if (drawnGalaxies >= RENDER_BUDGET.galaxies) continue;
             drawGalaxy(g, p, timeSec);
             visibleGalaxies++;
+            drawnGalaxies++;
           }
         }
 
@@ -517,10 +519,12 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
             const p = projectPoint(n.x, n.y, n.z);
             if (!p) continue;
 
-            const radius = Math.max(20, (n.radius / p.depth) * state.focal);
+            if (drawnNebulas >= RENDER_BUDGET.nebulas) continue;
+            const radius = clamp((n.radius / p.depth) * state.focal, 12, Math.min(state.w, state.h) * 0.42);
             const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius);
-            g.addColorStop(0, `rgba(${n.color}, ${n.alpha})`);
-            g.addColorStop(0.7, `rgba(${n.color}, ${n.alpha * 0.25})`);
+            const localAlpha = n.alpha * (1 - Math.min(0.75, p.depth / 2600));
+            g.addColorStop(0, `rgba(${n.color}, ${localAlpha})`);
+            g.addColorStop(0.7, `rgba(${n.color}, ${localAlpha * 0.22})`);
             g.addColorStop(1, `rgba(${n.color}, 0)`);
 
             ctx.fillStyle = g;
@@ -528,6 +532,7 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
             ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
             ctx.fill();
             visibleNebulas++;
+            drawnNebulas++;
           }
         }
 
@@ -542,9 +547,10 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
             const p = projectPoint(s.x, s.y, s.z);
             if (!p) continue;
 
+            if (drawnStars >= RENDER_BUDGET.stars) continue;
             const twinkle = 0.65 + 0.35 * Math.sin(timeSec * s.twinkleRate + s.twinklePhase);
-            const starSize = Math.max(0.85, (s.size / p.depth) * state.focal * 3.4);
-            const glow = Math.max(1.4, (s.glow / p.depth) * state.focal * 6.5);
+            const starSize = clamp((s.size / p.depth) * state.focal * 3.0, 0.55, 3.6);
+            const glow = clamp((s.glow / p.depth) * state.focal * 4.2, 0, 12);
 
             renderedStars.push({
               id: s.id,
@@ -565,6 +571,7 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
             ctx.arc(p.x, p.y, starSize, 0, Math.PI * 2);
             ctx.fill();
             visibleStars++;
+            drawnStars++;
           }
         }
 
@@ -745,7 +752,11 @@ Click/Tap star to select • T = 5s warp to selected star • W/S = forward/back
 
         ui.distance.textContent = formatDistance(totalTravel);
 
-        ensureChunks();
+        const ck = `${Math.floor(camera.x / CHUNK_SIZE)},${Math.floor(camera.y / CHUNK_SIZE)},${Math.floor(camera.z / CHUNK_SIZE)}`;
+        if (ck !== lastChunkKey) {
+          lastChunkKey = ck;
+          ensureChunks();
+        }
       }
 
       function chooseStarAt(clientX, clientY) {
