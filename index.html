@@ -1,0 +1,872 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Universe Engine: Infinite Drift</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --panel-bg: rgba(8, 14, 30, 0.78);
+      --panel-border: rgba(124, 170, 255, 0.35);
+      --text: #ddecff;
+      --muted: #90a4d6;
+      --accent: #95e7ff;
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #02040a;
+      font-family: Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      color: var(--text);
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      outline: none;
+    }
+
+    .hud {
+      position: fixed;
+      top: 14px;
+      left: 14px;
+      width: min(460px, calc(100vw - 28px));
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      box-shadow: 0 14px 28px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(9px);
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .hud h1 {
+      margin: 0 0 6px;
+      font-size: 15px;
+      color: var(--accent);
+      letter-spacing: 0.04em;
+      font-weight: 700;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      font-size: 12px;
+      margin: 3px 0;
+      color: var(--muted);
+    }
+
+    .value {
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .legend {
+      margin-top: 9px;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #aec1ee;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="space" tabindex="0"></canvas>
+
+  <div class="hud">
+    <h1>Universe Engine</h1>
+    <div class="row"><span>Current speed</span><span class="value" id="speed">1.00 m/s</span></div>
+    <div class="row"><span>Travel distance</span><span class="value" id="distance">0 m</span></div>
+    <div class="row"><span>Selected star</span><span class="value" id="selection">None</span></div>
+    <div class="row"><span>Teleport status</span><span class="value" id="teleport">Idle</span></div>
+    <div class="row"><span>Loaded sectors</span><span class="value" id="chunks">0</span></div>
+    <div class="row"><span>Rendered stars</span><span class="value" id="stars">0</span></div>
+    <div class="row"><span>Rendered nebulas</span><span class="value" id="nebulas">0</span></div>
+    <div class="row"><span>Rendered galaxies</span><span class="value" id="galaxies">0</span></div>
+    <div class="row"><span>FPS</span><span class="value" id="fps">0</span></div>
+    <div class="legend">
+Click/Tap star to select • T = 5s warp to selected star • WASD = movement relative to camera rotation • Arrow keys = free look • Hold P/L = smooth log acceleration • C = reset speed
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById('space');
+      const ctx = canvas.getContext('2d', { alpha: false });
+
+      const ui = {
+        speed: document.getElementById('speed'),
+        distance: document.getElementById('distance'),
+        selection: document.getElementById('selection'),
+        teleport: document.getElementById('teleport'),
+        chunks: document.getElementById('chunks'),
+        stars: document.getElementById('stars'),
+        nebulas: document.getElementById('nebulas'),
+        galaxies: document.getElementById('galaxies'),
+        fps: document.getElementById('fps')
+      };
+
+      const keys = new Set();
+
+      // Space-engine-like rendering approach: chunked procedural universe, aggressive culling,
+      // layered volumetric billboards and macro-structure (galaxies) to fake huge scale cheaply.
+      const CHUNK_SIZE = 8e11; // 800 billion meters (~5.35 AU)
+      const LOAD_RADIUS = 1;
+      const MAX_DRAW_DIST = CHUNK_SIZE * (LOAD_RADIUS + 1.8);
+      const VISUAL_SCALE = 2.5e9; // meters per visual unit for rendering
+      const FOV = Math.PI / 3;
+      const STAR_BASE_DENSITY = 24;
+      const NEBULA_BASE_DENSITY = 2;
+      const GALAXY_BASE_DENSITY = 0;
+
+      // Space Engine-like speed model: continuous log-scale target speed with smooth acceleration.
+      const SPEED_MODEL = {
+        minLog10: 0,   // 10^0 = 1 m/s
+        maxLog10: 23,  // 10^23 m/s
+        holdBaseRate: 0.9,
+        holdAccel: 2.3,
+        response: 6.0
+      };
+
+      const CONSTANTS = {
+        AU: 1.495978707e11,
+        LY: 9.4607e15,
+        KLY: 9.4607e18,
+        MLY: 9.4607e21
+      };
+
+      const STAR_TYPES = [
+        { name: 'Red Dwarf', color: '#ff8484', size: [0.75, 1.35], glow: [2, 4], twinkle: [0.5, 1.5] },
+        { name: 'Yellow Main Sequence', color: '#ffe8a8', size: [0.95, 1.8], glow: [3, 6], twinkle: [0.3, 1.0] },
+        { name: 'Blue Giant', color: '#9fd5ff', size: [1.4, 2.8], glow: [5, 9], twinkle: [0.35, 1.2] },
+        { name: 'White Dwarf', color: '#edf5ff', size: [0.65, 1.25], glow: [2, 4], twinkle: [0.7, 1.8] },
+        { name: 'Orange Giant', color: '#ffc990', size: [1.2, 2.35], glow: [4, 8], twinkle: [0.4, 1.4] },
+        { name: 'Neutron Star', color: '#ccb5ff', size: [0.55, 1.05], glow: [2, 4], twinkle: [0.8, 2.2] },
+        { name: 'Cyan Subdwarf', color: '#8ef0ff', size: [0.9, 1.7], glow: [2, 5], twinkle: [0.35, 1.25] }
+      ];
+
+      const NEBULA_TYPES = [
+        { color: '120,180,255', radius: [8e10, 2.2e11], alpha: [0.03, 0.10] },
+        { color: '255,120,220', radius: [7e10, 1.9e11], alpha: [0.03, 0.09] },
+        { color: '130,255,180', radius: [9e10, 2.4e11], alpha: [0.03, 0.10] },
+        { color: '255,210,120', radius: [7e10, 2.0e11], alpha: [0.02, 0.08] }
+      ];
+
+      const GALAXY_TYPES = [
+        { name: 'Spiral', core: '150,200,255', arm: '100,150,255', radius: [5e11, 1.4e12], alpha: [0.025, 0.06] },
+        { name: 'Barred Spiral', core: '255,200,150', arm: '255,130,190', radius: [4e11, 1.1e12], alpha: [0.022, 0.055] },
+        { name: 'Elliptical', core: '240,240,255', arm: '170,170,210', radius: [4e11, 1.0e12], alpha: [0.02, 0.05] }
+      ];
+
+      const camera = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 };
+      const world = { chunks: new Map() };
+      const state = { w: 1, h: 1, hw: 0.5, hh: 0.5, focal: 1 };
+
+      let currentSpeedLog10 = 0;
+      let targetSpeedLog10 = 0;
+      let totalTravel = 0;
+      let fpsState = { elapsed: 0, frames: 0, value: 0 };
+      const speedHold = {
+        plus: { held: false, time: 0 },
+        minus: { held: false, time: 0 }
+      };
+      let selectedStarId = null;
+      let selectedStarData = null;
+      let renderedStars = [];
+      let lastChunkKey = null;
+      const RENDER_BUDGET = { stars: 1200, nebulas: 90, galaxies: 24 };
+
+      let teleport = {
+        active: false,
+        startTime: 0,
+        start: null,
+        target: null,
+        duration: 5
+      };
+
+      function clamp(v, min, max) {
+        return Math.max(min, Math.min(max, v));
+      }
+
+      function formatSpeed(mps) {
+        if (mps >= CONSTANTS.MLY) return `${(mps / CONSTANTS.MLY).toFixed(2)} Mly/s`;
+        if (mps >= CONSTANTS.KLY) return `${(mps / CONSTANTS.KLY).toFixed(2)} kly/s`;
+        if (mps >= CONSTANTS.LY) return `${(mps / CONSTANTS.LY).toFixed(2)} ly/s`;
+        if (mps >= CONSTANTS.AU) return `${(mps / CONSTANTS.AU).toFixed(2)} AU/s`;
+        if (mps >= 1e9) return `${(mps / 1e9).toFixed(2)} Gm/s`;
+        if (mps >= 1e6) return `${(mps / 1e6).toFixed(2)} Mm/s`;
+        if (mps >= 1e3) return `${(mps / 1e3).toFixed(2)} km/s`;
+        return `${mps.toFixed(2)} m/s`;
+      }
+
+      function formatDistance(meters) {
+        if (meters >= CONSTANTS.MLY) return `${(meters / CONSTANTS.MLY).toFixed(3)} Mly`;
+        if (meters >= CONSTANTS.KLY) return `${(meters / CONSTANTS.KLY).toFixed(3)} kly`;
+        if (meters >= CONSTANTS.LY) return `${(meters / CONSTANTS.LY).toFixed(3)} ly`;
+        if (meters >= CONSTANTS.AU) return `${(meters / CONSTANTS.AU).toFixed(3)} AU`;
+        if (meters >= 1e9) return `${(meters / 1e9).toFixed(2)} Gm`;
+        if (meters >= 1e6) return `${(meters / 1e6).toFixed(2)} Mm`;
+        if (meters >= 1e3) return `${(meters / 1e3).toFixed(2)} km`;
+        return `${meters.toFixed(1)} m`;
+      }
+
+      function speedFromLog10(logV) {
+        return 10 ** logV;
+      }
+
+      function smoothApproach(current, target, dt, response) {
+        const t = 1 - Math.exp(-response * dt);
+        return current + (target - current) * t;
+      }
+
+      function refreshSpeedHud(speedValue) {
+        if (!teleport.active) {
+          ui.speed.textContent = formatSpeed(speedValue);
+        }
+      }
+
+      function hash32(x, y, z) {
+        let h = Math.imul(x, 0x8da6b343) ^ Math.imul(y, 0xd8163841) ^ Math.imul(z, 0xcb1ab31f);
+        h ^= h >>> 16;
+        h = Math.imul(h, 0x7feb352d);
+        h ^= h >>> 15;
+        h = Math.imul(h, 0x846ca68b);
+        h ^= h >>> 16;
+        return h >>> 0;
+      }
+
+      function createRng(seed) {
+        let s = seed >>> 0;
+        return () => {
+          s += 0x6d2b79f5;
+          let t = s;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      function randomRange(rng, min, max) {
+        return min + (max - min) * rng();
+      }
+
+      function chunkKey(x, y, z) {
+        return `${x},${y},${z}`;
+      }
+
+      function ensureChunks() {
+        const cx = Math.floor(camera.x / CHUNK_SIZE);
+        const cy = Math.floor(camera.y / CHUNK_SIZE);
+        const cz = Math.floor(camera.z / CHUNK_SIZE);
+
+        const needed = new Set();
+        for (let x = cx - LOAD_RADIUS; x <= cx + LOAD_RADIUS; x++) {
+          for (let y = cy - LOAD_RADIUS; y <= cy + LOAD_RADIUS; y++) {
+            for (let z = cz - LOAD_RADIUS; z <= cz + LOAD_RADIUS; z++) {
+              const key = chunkKey(x, y, z);
+              needed.add(key);
+              if (!world.chunks.has(key)) {
+                world.chunks.set(key, generateChunk(x, y, z));
+              }
+            }
+          }
+        }
+
+        for (const key of world.chunks.keys()) {
+          if (!needed.has(key)) world.chunks.delete(key);
+        }
+      }
+
+      function generateChunk(cx, cy, cz) {
+        const seed = hash32(cx, cy, cz);
+        const rng = createRng(seed);
+        const baseX = cx * CHUNK_SIZE;
+        const baseY = cy * CHUNK_SIZE;
+        const baseZ = cz * CHUNK_SIZE;
+
+        const stars = [];
+        const nebulas = [];
+        const galaxies = [];
+
+        const starCount = STAR_BASE_DENSITY + Math.floor(rng() * STAR_BASE_DENSITY);
+        const nebulaCount = NEBULA_BASE_DENSITY + Math.floor(rng() * 3);
+        const galaxyCount = GALAXY_BASE_DENSITY + Math.floor(rng() * 2); // 0..1 mostly to reduce overdraw
+
+        for (let i = 0; i < starCount; i++) {
+          const t = STAR_TYPES[Math.floor(rng() * STAR_TYPES.length)];
+          const id = `${cx}:${cy}:${cz}:s:${i}`;
+          stars.push({
+            id,
+            type: t.name,
+            x: baseX + rng() * CHUNK_SIZE,
+            y: baseY + rng() * CHUNK_SIZE,
+            z: baseZ + rng() * CHUNK_SIZE,
+            color: t.color,
+            size: randomRange(rng, t.size[0], t.size[1]),
+            glow: randomRange(rng, t.glow[0], t.glow[1]),
+            twinklePhase: rng() * Math.PI * 2,
+            twinkleRate: randomRange(rng, t.twinkle[0], t.twinkle[1])
+          });
+        }
+
+        for (let i = 0; i < nebulaCount; i++) {
+          const n = NEBULA_TYPES[Math.floor(rng() * NEBULA_TYPES.length)];
+          nebulas.push({
+            x: baseX + rng() * CHUNK_SIZE,
+            y: baseY + rng() * CHUNK_SIZE,
+            z: baseZ + rng() * CHUNK_SIZE,
+            radius: randomRange(rng, n.radius[0], n.radius[1]),
+            alpha: randomRange(rng, n.alpha[0], n.alpha[1]),
+            color: n.color
+          });
+        }
+
+        for (let i = 0; i < galaxyCount; i++) {
+          const g = GALAXY_TYPES[Math.floor(rng() * GALAXY_TYPES.length)];
+          galaxies.push({
+            type: g.name,
+            x: baseX + rng() * CHUNK_SIZE,
+            y: baseY + rng() * CHUNK_SIZE,
+            z: baseZ + rng() * CHUNK_SIZE,
+            radius: randomRange(rng, g.radius[0], g.radius[1]),
+            alpha: randomRange(rng, g.alpha[0], g.alpha[1]),
+            core: g.core,
+            arm: g.arm,
+            spin: randomRange(rng, -1.3, 1.3)
+          });
+        }
+
+        return { stars, nebulas, galaxies };
+      }
+
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        state.w = Math.floor(window.innerWidth * dpr);
+        state.h = Math.floor(window.innerHeight * dpr);
+        state.hw = state.w * 0.5;
+        state.hh = state.h * 0.5;
+        state.focal = state.hw / Math.tan(FOV * 0.5);
+
+        canvas.width = state.w;
+        canvas.height = state.h;
+        canvas.style.width = `${window.innerWidth}px`;
+        canvas.style.height = `${window.innerHeight}px`;
+      }
+
+      function getBasisVectors() {
+        const cp = Math.cos(camera.pitch);
+        const sp = Math.sin(camera.pitch);
+        const cy = Math.cos(camera.yaw);
+        const sy = Math.sin(camera.yaw);
+
+        // Full camera-relative basis (Space Engine-like free orientation controls).
+        const forward = { x: sy * cp, y: sp, z: cy * cp };
+
+        // Build right vector from world up x forward, then normalize.
+        const worldUp = { x: 0, y: 1, z: 0 };
+        let rx = worldUp.y * forward.z - worldUp.z * forward.y;
+        let ry = worldUp.z * forward.x - worldUp.x * forward.z;
+        let rz = worldUp.x * forward.y - worldUp.y * forward.x;
+        let rLen = Math.hypot(rx, ry, rz);
+
+        // If looking nearly straight up/down, use yaw-only fallback.
+        if (rLen < 1e-4) {
+          rx = cy;
+          ry = 0;
+          rz = -sy;
+          rLen = Math.hypot(rx, ry, rz);
+        }
+
+        const right = { x: rx / rLen, y: ry / rLen, z: rz / rLen };
+        return { forward, right };
+      }
+
+      function projectPoint(wx, wy, wz) {
+        const dx = (wx - camera.x) / VISUAL_SCALE;
+        const dy = (wy - camera.y) / VISUAL_SCALE;
+        const dz = (wz - camera.z) / VISUAL_SCALE;
+
+        const cy = Math.cos(-camera.yaw);
+        const sy = Math.sin(-camera.yaw);
+        const cp = Math.cos(-camera.pitch);
+        const sp = Math.sin(-camera.pitch);
+
+        const x1 = dx * cy - dz * sy;
+        const z1 = dx * sy + dz * cy;
+        const y2 = dy * cp - z1 * sp;
+        const z2 = dy * sp + z1 * cp;
+
+        if (z2 < 0.1) return null;
+
+        const sx = state.hw + (x1 / z2) * state.focal;
+        const sy2 = state.hh - (y2 / z2) * state.focal;
+
+        if (sx < -80 || sx > state.w + 80 || sy2 < -80 || sy2 > state.h + 80) return null;
+
+        return { x: sx, y: sy2, depth: z2 };
+      }
+
+      function drawBackground() {
+        const grad = ctx.createLinearGradient(0, 0, 0, state.h);
+        grad.addColorStop(0, '#060f25');
+        grad.addColorStop(0.5, '#040917');
+        grad.addColorStop(1, '#02040b');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, state.w, state.h);
+      }
+
+      function drawDistantStarfield(timeSec) {
+        // Low-overdraw background star dome (Space Engine style distant shell illusion).
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        ctx.globalAlpha = 0.14;
+        const layers = 2;
+        for (let layer = 0; layer < layers; layer++) {
+          const parallax = 0.12 + layer * 0.16;
+          const count = 80 + layer * 60;
+          for (let i = 0; i < count; i++) {
+            const a = (i * 12.9898 + layer * 78.233) % 6.28318;
+            const b = (i * 78.233 + layer * 45.123) % 6.28318;
+            const x = (Math.sin(a + camera.yaw * parallax + timeSec * 0.0025 * (layer + 1)) * 0.5 + 0.5) * state.w;
+            const y = (Math.cos(b + camera.pitch * parallax) * 0.5 + 0.5) * state.h;
+            const r = 0.45 + layer * 0.25;
+            ctx.fillStyle = layer === 1 ? 'rgba(170,205,255,0.25)' : 'rgba(220,230,255,0.2)';
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
+      }
+
+      function drawPostFX() {
+        // Dark-space tonemapping style pass: vignette only (avoid white wash).
+        const vignette = ctx.createRadialGradient(state.hw, state.hh, state.h * 0.1, state.hw, state.hh, Math.max(state.w, state.h) * 0.72);
+        vignette.addColorStop(0, 'rgba(0,0,0,0)');
+        vignette.addColorStop(1, 'rgba(0,0,0,0.38)');
+        ctx.fillStyle = vignette;
+        ctx.fillRect(0, 0, state.w, state.h);
+      }
+
+      function drawVolumetricHaze(timeSec) {
+        // Layered full-screen fog slices to emulate cheap volumetric scattering.
+        ctx.globalCompositeOperation = 'screen';
+        for (let i = 0; i < 5; i++) {
+          const phase = timeSec * (0.02 + i * 0.01) + camera.yaw * (0.8 + i * 0.2);
+          const yCenter = state.hh + Math.sin(phase) * (state.h * 0.18) + (i - 2) * state.h * 0.15;
+          const radius = state.w * (0.35 + i * 0.12);
+          const alpha = 0.03 - i * 0.004;
+          const g = ctx.createRadialGradient(state.hw, yCenter, radius * 0.15, state.hw, yCenter, radius);
+          g.addColorStop(0, `rgba(120,150,210,${Math.max(0, alpha)})`);
+          g.addColorStop(1, 'rgba(20,40,90,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, state.w, state.h);
+        }
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      function drawGalaxy(g, p, timeSec) {
+        const radius = clamp((g.radius / p.depth) * state.focal, 20, Math.min(state.w, state.h) * 0.48);
+        const angle = g.spin * timeSec * 0.03;
+
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(angle);
+
+        const disk = ctx.createRadialGradient(0, 0, radius * 0.08, 0, 0, radius);
+        disk.addColorStop(0, `rgba(${g.core}, ${g.alpha * 1.6})`);
+        disk.addColorStop(0.35, `rgba(${g.arm}, ${g.alpha})`);
+        disk.addColorStop(1, 'rgba(10,20,35,0)');
+
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = disk;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, radius, radius * 0.45, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Spiral-arm hint.
+        ctx.strokeStyle = `rgba(${g.arm}, ${g.alpha * 0.95})`;
+        ctx.lineWidth = Math.max(1, radius * 0.02);
+        ctx.beginPath();
+        for (let t = 0; t <= 1; t += 0.05) {
+          const r = t * radius;
+          const a = t * 8 + 0.2;
+          const x = Math.cos(a) * r;
+          const y = Math.sin(a) * r * 0.45;
+          if (t === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        ctx.restore();
+      }
+
+      function draw(timeSec) {
+        drawBackground();
+        drawDistantStarfield(timeSec);
+        drawVolumetricHaze(timeSec);
+
+        const maxDrawSq = MAX_DRAW_DIST * MAX_DRAW_DIST;
+        let visibleStars = 0;
+        let visibleNebulas = 0;
+        let visibleGalaxies = 0;
+        let drawnStars = 0;
+        let drawnNebulas = 0;
+        let drawnGalaxies = 0;
+        renderedStars = [];
+
+        ctx.globalCompositeOperation = 'lighter';
+
+        // Draw far macro-structure first (galaxies), then volumetric nebulas, then stars.
+        for (const chunk of world.chunks.values()) {
+          for (const g of chunk.galaxies) {
+            const dx = g.x - camera.x;
+            const dy = g.y - camera.y;
+            const dz = g.z - camera.z;
+            const distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq > maxDrawSq * 2.8) continue;
+
+            const p = projectPoint(g.x, g.y, g.z);
+            if (!p) continue;
+            if (drawnGalaxies >= RENDER_BUDGET.galaxies) continue;
+            drawGalaxy(g, p, timeSec);
+            visibleGalaxies++;
+            drawnGalaxies++;
+          }
+        }
+
+        for (const chunk of world.chunks.values()) {
+          for (const n of chunk.nebulas) {
+            const dx = n.x - camera.x;
+            const dy = n.y - camera.y;
+            const dz = n.z - camera.z;
+            const distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq > maxDrawSq * 1.9) continue;
+
+            const p = projectPoint(n.x, n.y, n.z);
+            if (!p) continue;
+
+            if (drawnNebulas >= RENDER_BUDGET.nebulas) continue;
+            const radius = clamp((n.radius / p.depth) * state.focal, 12, Math.min(state.w, state.h) * 0.42);
+            const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius);
+            const localAlpha = n.alpha * (1 - Math.min(0.75, p.depth / 2600));
+            g.addColorStop(0, `rgba(${n.color}, ${localAlpha})`);
+            g.addColorStop(0.7, `rgba(${n.color}, ${localAlpha * 0.22})`);
+            g.addColorStop(1, `rgba(${n.color}, 0)`);
+
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+            ctx.fill();
+            visibleNebulas++;
+            drawnNebulas++;
+          }
+        }
+
+        for (const chunk of world.chunks.values()) {
+          for (const s of chunk.stars) {
+            const dx = s.x - camera.x;
+            const dy = s.y - camera.y;
+            const dz = s.z - camera.z;
+            const distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq > maxDrawSq) continue;
+
+            const p = projectPoint(s.x, s.y, s.z);
+            if (!p) continue;
+
+            if (drawnStars >= RENDER_BUDGET.stars) continue;
+            const twinkle = 0.65 + 0.35 * Math.sin(timeSec * s.twinkleRate + s.twinklePhase);
+            const starSize = clamp((s.size / p.depth) * state.focal * 3.0, 0.55, 3.6);
+            const glow = clamp((s.glow / p.depth) * state.focal * 4.2, 0, 12);
+
+            renderedStars.push({
+              id: s.id,
+              type: s.type,
+              x: s.x,
+              y: s.y,
+              z: s.z,
+              sx: p.x,
+              sy: p.y,
+              radius: Math.max(7, starSize * 3.2)
+            });
+
+            ctx.shadowBlur = glow;
+            ctx.shadowColor = s.color;
+            ctx.globalAlpha = twinkle;
+            ctx.fillStyle = s.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, starSize, 0, Math.PI * 2);
+            ctx.fill();
+            visibleStars++;
+            drawnStars++;
+          }
+        }
+
+        ctx.globalAlpha = 1;
+        ctx.shadowBlur = 0;
+        ctx.globalCompositeOperation = 'source-over';
+
+        drawSelectionMarker(timeSec);
+
+        // Center reticle.
+        ctx.strokeStyle = 'rgba(158, 223, 255, 0.22)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(state.hw - 8, state.hh);
+        ctx.lineTo(state.hw + 8, state.hh);
+        ctx.moveTo(state.hw, state.hh - 8);
+        ctx.lineTo(state.hw, state.hh + 8);
+        ctx.stroke();
+
+        drawPostFX();
+
+        ui.stars.textContent = visibleStars.toLocaleString();
+        ui.nebulas.textContent = visibleNebulas.toLocaleString();
+        ui.galaxies.textContent = visibleGalaxies.toLocaleString();
+        ui.chunks.textContent = world.chunks.size.toLocaleString();
+      }
+
+      function drawSelectionMarker(timeSec) {
+        if (!selectedStarId) return;
+        const selectedRendered = renderedStars.find((s) => s.id === selectedStarId);
+        if (!selectedRendered) return;
+
+        const pulse = 1 + 0.2 * Math.sin(timeSec * 4);
+        const r = selectedRendered.radius * pulse;
+        ctx.strokeStyle = 'rgba(120, 255, 220, 0.9)';
+        ctx.lineWidth = 1.7;
+        ctx.beginPath();
+        ctx.arc(selectedRendered.sx, selectedRendered.sy, r, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(120, 255, 220, 0.5)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(selectedRendered.sx, selectedRendered.sy, r + 5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      function resetSpeed() {
+        targetSpeedLog10 = 0;
+        currentSpeedLog10 = 0;
+        refreshSpeedHud(speedFromLog10(currentSpeedLog10));
+      }
+
+      function applyHeldSpeedControls(dt) {
+        const updateHold = (bucket, sign) => {
+          if (!bucket.held) {
+            bucket.time = 0;
+            return;
+          }
+
+          bucket.time += dt;
+          const rate = SPEED_MODEL.holdBaseRate + SPEED_MODEL.holdAccel * (1 - Math.exp(-bucket.time * 1.8));
+          targetSpeedLog10 = clamp(targetSpeedLog10 + sign * rate * dt, SPEED_MODEL.minLog10, SPEED_MODEL.maxLog10);
+        };
+
+        updateHold(speedHold.plus, +1);
+        updateHold(speedHold.minus, -1);
+        currentSpeedLog10 = smoothApproach(currentSpeedLog10, targetSpeedLog10, dt, SPEED_MODEL.response);
+        refreshSpeedHud(speedFromLog10(currentSpeedLog10));
+      }
+
+      function startTeleport(nowSec) {
+        if (!selectedStarData || teleport.active) return;
+
+        teleport.active = true;
+        teleport.startTime = nowSec;
+        teleport.duration = 5;
+        teleport.start = { x: camera.x, y: camera.y, z: camera.z };
+        teleport.target = { x: selectedStarData.x, y: selectedStarData.y, z: selectedStarData.z };
+        ui.teleport.textContent = 'Warping... 0%';
+      }
+
+      function updateTeleport(nowSec) {
+        if (!teleport.active) return;
+
+        const t = clamp((nowSec - teleport.startTime) / teleport.duration, 0, 1);
+        const k = 5.5; // higher k = stronger exponential feel near the end.
+        const eased = (Math.exp(k * t) - 1) / (Math.exp(k) - 1);
+
+        camera.x = teleport.start.x + (teleport.target.x - teleport.start.x) * eased;
+        camera.y = teleport.start.y + (teleport.target.y - teleport.start.y) * eased;
+        camera.z = teleport.start.z + (teleport.target.z - teleport.start.z) * eased;
+
+        const pseudoSpeed = Math.max(speedFromLog10(currentSpeedLog10), (0.15 + eased) * 0.8 * CONSTANTS.LY);
+        ui.speed.textContent = `Warp ${formatSpeed(pseudoSpeed)}`;
+        ui.teleport.textContent = `Warping... ${(t * 100).toFixed(0)}%`;
+
+        if (t >= 1) {
+          teleport.active = false;
+          ui.teleport.textContent = 'Arrived';
+          ui.speed.textContent = formatSpeed(speedFromLog10(currentSpeedLog10));
+        }
+      }
+
+      function updateFPS(dt) {
+        fpsState.elapsed += dt;
+        fpsState.frames += 1;
+        if (fpsState.elapsed >= 0.25) {
+          fpsState.value = fpsState.frames / fpsState.elapsed;
+          ui.fps.textContent = fpsState.value.toFixed(0);
+          fpsState.elapsed = 0;
+          fpsState.frames = 0;
+        }
+      }
+
+      function update(dt, nowSec) {
+        updateTeleport(nowSec);
+        applyHeldSpeedControls(dt);
+
+        const lookRate = 1.2;
+        if (keys.has('ArrowLeft')) camera.yaw += lookRate * dt;
+        if (keys.has('ArrowRight')) camera.yaw -= lookRate * dt;
+        if (keys.has('ArrowUp')) camera.pitch += lookRate * dt;
+        if (keys.has('ArrowDown')) camera.pitch -= lookRate * dt;
+
+        if (!teleport.active) {
+          const { forward, right } = getBasisVectors();
+
+          let vx = 0;
+          let vy = 0;
+          let vz = 0;
+
+          if (keys.has('KeyW')) {
+            vx += forward.x;
+            vy += forward.y;
+            vz += forward.z;
+          }
+          if (keys.has('KeyS')) {
+            vx -= forward.x;
+            vy -= forward.y;
+            vz -= forward.z;
+          }
+          // Requested mapping: A strafes right, D strafes left.
+          if (keys.has('KeyA')) {
+            vx += right.x;
+            vz += right.z;
+          }
+          if (keys.has('KeyD')) {
+            vx -= right.x;
+            vz -= right.z;
+          }
+
+          const speed = speedFromLog10(currentSpeedLog10);
+          const length = Math.hypot(vx, vy, vz);
+
+          if (length > 0) {
+            vx /= length;
+            vy /= length;
+            vz /= length;
+
+            const distanceThisFrame = speed * dt;
+            camera.x += vx * distanceThisFrame;
+            camera.y += vy * distanceThisFrame;
+            camera.z += vz * distanceThisFrame;
+            totalTravel += distanceThisFrame;
+          }
+        }
+
+        ui.distance.textContent = formatDistance(totalTravel);
+
+        const ck = `${Math.floor(camera.x / CHUNK_SIZE)},${Math.floor(camera.y / CHUNK_SIZE)},${Math.floor(camera.z / CHUNK_SIZE)}`;
+        if (ck !== lastChunkKey) {
+          lastChunkKey = ck;
+          ensureChunks();
+        }
+      }
+
+      function chooseStarAt(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        const dprX = state.w / rect.width;
+        const dprY = state.h / rect.height;
+        const x = (clientX - rect.left) * dprX;
+        const y = (clientY - rect.top) * dprY;
+
+        let best = null;
+        let bestDistSq = Infinity;
+        for (const star of renderedStars) {
+          const dx = star.sx - x;
+          const dy = star.sy - y;
+          const d2 = dx * dx + dy * dy;
+          const maxR = star.radius * star.radius;
+          if (d2 < maxR && d2 < bestDistSq) {
+            best = star;
+            bestDistSq = d2;
+          }
+        }
+
+        if (best) {
+          selectedStarId = best.id;
+          selectedStarData = best;
+          ui.selection.textContent = `${best.type}`;
+          ui.teleport.textContent = 'Ready (press T)';
+        } else {
+          selectedStarId = null;
+          selectedStarData = null;
+          ui.selection.textContent = 'None';
+          if (!teleport.active) ui.teleport.textContent = 'Idle';
+        }
+      }
+
+      function isHandledCode(code) {
+        return code === 'ArrowLeft' || code === 'ArrowRight' || code === 'ArrowUp' || code === 'ArrowDown' || code === 'KeyW' || code === 'KeyA' || code === 'KeyS' || code === 'KeyD' || code === 'KeyP' || code === 'KeyL' || code === 'KeyC' || code === 'KeyT';
+      }
+
+      document.addEventListener('keydown', (event) => {
+        keys.add(event.code);
+
+        if (!event.repeat) {
+          if (event.code === 'KeyP') speedHold.plus.held = true;
+          if (event.code === 'KeyL') speedHold.minus.held = true;
+          if (event.code === 'KeyC') resetSpeed();
+          if (event.code === 'KeyT') startTeleport(performance.now() / 1000);
+        }
+
+        if (isHandledCode(event.code)) event.preventDefault();
+      }, { passive: false });
+
+      document.addEventListener('keyup', (event) => {
+        keys.delete(event.code);
+        if (event.code === 'KeyP') speedHold.plus.held = false;
+        if (event.code === 'KeyL') speedHold.minus.held = false;
+      });
+
+      canvas.addEventListener('pointerdown', (event) => {
+        canvas.focus();
+        chooseStarAt(event.clientX, event.clientY);
+      });
+
+      window.addEventListener('resize', resize);
+
+      resize();
+      resetSpeed();
+      ensureChunks();
+      ui.selection.textContent = 'None';
+      ui.teleport.textContent = 'Idle';
+
+      let previous = performance.now();
+      function frame(now) {
+        const dt = Math.min((now - previous) / 1000, 0.05);
+        previous = now;
+
+        update(dt, now / 1000);
+        updateFPS(dt);
+        draw(now / 1000);
+
+        requestAnimationFrame(frame);
+      }
+
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
